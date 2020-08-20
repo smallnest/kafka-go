@@ -27,6 +27,7 @@ const (
 var (
 	errOnlyAvailableWithGroup = errors.New("unavailable when GroupID is not set")
 	errNotAvailableWithGroup  = errors.New("unavailable when GroupID is set")
+	errNoMoreMessage          = errors.New("no more message to read")
 )
 
 const (
@@ -699,6 +700,73 @@ func (r *Reader) ReadMessage(ctx context.Context) (Message, error) {
 	}
 
 	return m, nil
+}
+
+func (r *Reader) ReadMessageWithoutBlocking(ctx context.Context) (Message, error) {
+	m, err := r.FetchMessageWithoutBlocking(ctx)
+	if err != nil {
+		return Message{}, err
+	}
+
+	if r.useConsumerGroup() {
+		if err := r.CommitMessages(ctx, m); err != nil {
+			return Message{}, err
+		}
+	}
+
+	return m, nil
+}
+
+func (r *Reader) FetchMessageWithoutBlocking(ctx context.Context) (Message, error) {
+	r.activateReadLag()
+
+	for {
+		r.mutex.Lock()
+
+		if !r.closed && r.version == 0 {
+			r.start(map[int]int64{r.config.Partition: r.offset})
+		}
+
+		version := r.version
+		r.mutex.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+
+		case m, ok := <-r.msgs:
+			if !ok {
+				return Message{}, io.EOF
+			}
+
+			if m.version >= version {
+				r.mutex.Lock()
+
+				switch {
+				case m.error != nil:
+				case version == r.version:
+					r.offset = m.message.Offset + 1
+					r.lag = m.watermark - r.offset
+				}
+
+				r.mutex.Unlock()
+
+				switch m.error {
+				case nil:
+				case io.EOF:
+					// io.EOF is used as a marker to indicate that the stream
+					// has been closed, in case it was received from the inner
+					// reader we don't want to confuse the program and replace
+					// the error with io.ErrUnexpectedEOF.
+					m.error = io.ErrUnexpectedEOF
+				}
+
+				return m.message, m.error
+			}
+		default:
+			return Message{}, errNoMoreMessage
+		}
+	}
 }
 
 // FetchMessage reads and return the next message from the r. The method call
