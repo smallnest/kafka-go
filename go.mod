@@ -1,6 +1,6 @@
-module github.com/segmentio/kafka-go
+module github.com/smallnest/kafka-go
 
-go 1.11
+go 1.14
 
 require (
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21
